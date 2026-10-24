@@ -3,28 +3,127 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-# Global list to hold calibration points
+# --- SPEED SIGN CONFIGURATION ---
+SPEED_LIMIT = 30  # Threshold speed in MPH
+baseSpeed = 30
+
+# Calibration clicks container
 src_points = []
 
 
 def select_points(event, x, y, flags, param):
-    """Mouse callback function to record 4 calibration clicks."""
+    """Mouse callback to log calibration points on the video side only."""
     if event == cv2.EVENT_LBUTTONDOWN and len(src_points) < 4:
-        src_points.append([x, y])
-        print(f"Point {len(src_points)} selected at: ({x}, {y})")
+        # Constrain click coordinates to the left video frame (width: 960)
+        if x < 960:
+            src_points.append([x, y])
+            print(f"Point {len(src_points)} selected at: ({x}, {y})")
 
 
-# 1. Load YOLO Model
+def create_dynamic_speed_sign(
+    current_max_speed, speed_limit=SPEED_LIMIT, width=400, height=540
+):
+    """Generates a dynamic electronic speed sign UI canvas."""
+    # Dark modern dashboard background
+    canvas = np.full((height, width, 3), (25, 25, 25), dtype=np.uint8)
+
+    # 1. Main White Speed Sign Frame
+    sign_margin = 30
+    sign_top = 20
+    sign_bottom = height - 20
+    cv2.rectangle(
+        canvas,
+        (sign_margin, sign_top),
+        (width - sign_margin, sign_bottom),
+        (240, 240, 240),
+        -1,
+    )
+    cv2.rectangle(
+        canvas,
+        (sign_margin + 8, sign_top + 8),
+        (width - sign_margin - 8, sign_bottom - 8),
+        (10, 10, 10),
+        4,
+    )
+
+    # 2. Sign Header Text
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    cv2.putText(
+        canvas,
+        "SPEED",
+        (width // 2 - 75, sign_top + 65),
+        font,
+        1.3,
+        (10, 10, 10),
+        4,
+    )
+    cv2.putText(
+        canvas,
+        "LIMIT",
+        (width // 2 - 70, sign_top + 120),
+        font,
+        1.3,
+        (10, 10, 10),
+        4,
+    )
+
+    # 3. Static Speed Limit Number
+    cv2.putText(
+        canvas,
+        f"{speed_limit}",
+        (width // 2 - 80, sign_top + 280),
+        font,
+        3.8,
+        (10, 10, 10),
+        10,
+    )
+
+    # 4. Dynamic Speed LED Panel
+    panel_y1 = sign_top + 330
+    panel_y2 = sign_bottom - 25
+    cv2.rectangle(
+        canvas,
+        (sign_margin + 20, panel_y1),
+        (width - sign_margin - 20, panel_y2),
+        (0, 0, 0),
+        -1,
+    )
+
+    is_speeding = current_max_speed > speed_limit
+    led_color = (0, 0, 255) if is_speeding else (0, 255, 0)  # Red vs Green
+
+    speed_text = f"{int(current_max_speed)}"
+    text_size, _ = cv2.getTextSize(speed_text, font, 2.5, 6)
+    text_x = (width - text_size[0]) // 2
+    cv2.putText(
+        canvas, speed_text, (text_x, panel_y1 + 80), font, 2.5, led_color, 6
+    )
+
+    unit_text = "YOUR SPEED"
+    unit_size, _ = cv2.getTextSize(unit_text, font, 0.6, 2)
+    unit_x = (width - unit_size[0]) // 2
+    cv2.putText(
+        canvas,
+        unit_text,
+        (unit_x, panel_y1 + 115),
+        font,
+        0.6,
+        (200, 200, 200),
+        2,
+    )
+
+    return canvas
+
+
+# Load YOLO Model
 model = YOLO("yolov8n.pt")
 
-WINDOW_NAME = "Dynamic Speed Sign - Performance & Speed Calibrated"
+WINDOW_NAME = "Hackathon Dynamic Speed Sign System"
 cap = cv2.VideoCapture("traffic/traffic3.mp4")
 
-# Automatically detect video Framerate (FPS)
 fps = cap.get(cv2.CAP_PROP_FPS)
 if fps <= 0 or np.isnan(fps):
-    fps = 30.0  # Fallback standard FPS
-
+    fps = 30.0
 FRAME_TIME = 1.0 / fps
 
 ret, first_frame = cap.read()
@@ -33,31 +132,32 @@ if not ret:
     cap.release()
     exit()
 
-# 2. Interactive Calibration Phase
+# Resize video frame to standard dimensions for side-by-side stacking
+VIDEO_W, VIDEO_H = 960, 540
+first_frame = cv2.resize(first_frame, (VIDEO_W, VIDEO_H))
+
+# Display setup
 cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-cv2.resizeWindow(WINDOW_NAME, 960, 540)
+cv2.resizeWindow(WINDOW_NAME, 1360, 540)  # 960 (Video) + 400 (Sign) = 1360
 cv2.setMouseCallback(WINDOW_NAME, select_points)
 
 print("\n=== CALIBRATION REQUIRED ===")
-print(
-    "Click 4 points on the road in order: Top-Left -> Top-Right -> Bottom-Right -> Bottom-Left"
-)
+print("Click 4 points on the road in order: Top-Left -> Top-Right -> Bottom-Right -> Bottom-Left")
 
+# Calibration Phase
 while len(src_points) < 4:
-    display_frame = first_frame.copy()
+    display_video = first_frame.copy()
 
     for i, pt in enumerate(src_points):
-        cv2.circle(display_frame, tuple(pt), 7, (0, 0, 255), -1)
+        cv2.circle(display_video, tuple(pt), 7, (0, 0, 255), -1)
         if i > 0:
-            cv2.line(display_frame, tuple(src_points[i - 1]), tuple(pt), (0, 0, 255), 2)
+            cv2.line(display_video, tuple(src_points[i - 1]), tuple(pt), (0, 0, 255), 2)
 
     if len(src_points) == 4:
-        cv2.line(
-            display_frame, tuple(src_points[3]), tuple(src_points[0]), (0, 0, 255), 2
-        )
+        cv2.line(display_video, tuple(src_points[3]), tuple(src_points[0]), (0, 0, 255), 2)
 
     cv2.putText(
-        display_frame,
+        display_video,
         f"Click point {len(src_points) + 1}/4 on road corners",
         (30, 50),
         cv2.FONT_HERSHEY_SIMPLEX,
@@ -65,39 +165,39 @@ while len(src_points) < 4:
         (0, 255, 255),
         2,
     )
-    cv2.imshow(WINDOW_NAME, display_frame)
+
+    # Combine video preview + initial speed sign
+    sign_canvas = create_dynamic_speed_sign(0, SPEED_LIMIT, width=400, height=VIDEO_H)
+    combined_screen = np.hstack((display_video, sign_canvas))
+
+    cv2.imshow(WINDOW_NAME, combined_screen)
 
     if cv2.waitKey(10) & 0xFF == ord("q"):
         cap.release()
         cv2.destroyAllWindows()
         exit()
 
-# Remove mouse listener
+# Remove mouse listener after calibration
 cv2.setMouseCallback(WINDOW_NAME, lambda *args: None)
 
-# 3. Compute Perspective Transform Matrix
+# Perspective Matrix Setup
 SRC_POINTS = np.float32(src_points)
 DST_POINTS = np.float32([[0, 0], [200, 0], [200, 600], [0, 600]])
 M = cv2.getPerspectiveTransform(SRC_POINTS, DST_POINTS)
 
 
 def transform_point(x, y, matrix):
-    """Transforms 2D screen coordinates to bird's-eye view plane."""
     pt = np.array([[[x, y]]], dtype=np.float32)
     transformed = cv2.perspectiveTransform(pt, matrix)
     return transformed[0][0][0], transformed[0][0][1]
 
 
-# 4. Calibration & Tracking Setup
-# ADJUSTED: Reduced from 20.0 to 6.5 so a ~10 MPH output scales up 3x to ~30 MPH
 PIXELS_PER_METER = 6.5
-
-# Performance knob: Process model inference every N frames (1 = every frame, 2 = every 2nd frame)
 FRAME_SKIP = 2
 frame_count = 0
 
 track_history = {}
-speed_queues = {}  # Smooths speed jumps using rolling average
+speed_queues = {}
 
 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
@@ -106,9 +206,9 @@ while cap.isOpened():
     if not ret:
         break
 
+    frame = cv2.resize(frame, (VIDEO_W, VIDEO_H))
     frame_count += 1
 
-    # Run inference only on target skipped frames to boost processing FPS
     if frame_count % FRAME_SKIP == 0:
         results = model.track(
             frame,
@@ -116,12 +216,11 @@ while cap.isOpened():
             conf=0.4,
             persist=True,
             tracker="bytetrack.yaml",
-            verbose=False,  # Suppress console log output to save CPU cycles
+            verbose=False,
         )
 
         annotated_frame = results[0].plot(labels=False)
 
-        # Draw calibration boundary
         cv2.polylines(
             annotated_frame,
             [np.int32(src_points)],
@@ -129,6 +228,8 @@ while cap.isOpened():
             color=(0, 255, 0),
             thickness=2,
         )
+
+        current_frame_max_speed = 0.0
 
         if results[0].boxes.id is not None:
             boxes = results[0].boxes.xyxy.cpu().numpy()
@@ -147,9 +248,7 @@ while cap.isOpened():
                 if track_id in track_history:
                     prev_flat_cx, prev_flat_cy, prev_frame_num = track_history[track_id]
 
-                    # Account for skipped frames in time delta
                     effective_dt = (frame_count - prev_frame_num) * FRAME_TIME
-
                     pixel_distance = (
                         (flat_cx - prev_flat_cx) ** 2 + (flat_cy - prev_flat_cy) ** 2
                     ) ** 0.5
@@ -160,7 +259,6 @@ while cap.isOpened():
 
                 track_history[track_id] = (flat_cx, flat_cy, frame_count)
 
-                # Smooth speed using rolling queue across frames
                 if track_id not in speed_queues:
                     speed_queues[track_id] = deque(maxlen=5)
 
@@ -172,6 +270,9 @@ while cap.isOpened():
                     if len(speed_queues[track_id]) > 0
                     else 0.0
                 )
+
+                if display_speed > current_frame_max_speed:
+                    current_frame_max_speed = display_speed
 
                 label_text = (
                     f"{int(display_speed)} MPH" if display_speed > 1.0 else "0 MPH"
@@ -187,7 +288,6 @@ while cap.isOpened():
                 text_w, text_h = text_size
                 tx, ty = int(x1), int(y1) - 15
 
-                # Dark background pill
                 cv2.rectangle(
                     annotated_frame,
                     (tx, ty - text_h - 10),
@@ -196,19 +296,35 @@ while cap.isOpened():
                     -1,
                 )
 
-                # Prominent yellow text
+                # Turn overlay text red if speeding, yellow if within limit
+                text_color = (
+                    (0, 0, 255) if display_speed > SPEED_LIMIT else (0, 255, 255)
+                )
+
                 cv2.putText(
                     annotated_frame,
                     label_text,
                     (tx + 6, ty - 2),
                     font,
                     font_scale,
-                    (0, 255, 255),
+                    text_color,
                     thickness,
                 )
 
-        cv2.imshow(WINDOW_NAME, annotated_frame)
+        # Generate side panel with current max vehicle speed
+        speed_sign_canvas = create_dynamic_speed_sign(
+            current_frame_max_speed, SPEED_LIMIT, width=400, height=VIDEO_H
+        )
 
+        # Concatenate video frame and dynamic speed sign horizontally
+        final_dashboard = np.hstack((annotated_frame, speed_sign_canvas))
+
+        cv2.imshow(WINDOW_NAME, final_dashboard)
+        num_cars = len(track_ids) if results[0].boxes.id is not None else 0
+        
+        # Lower speed limit during high traffic density (e.g., 3 or more vehicles)
+        SPEED_LIMIT = baseSpeed - num_cars
+    
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
