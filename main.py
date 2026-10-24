@@ -1,6 +1,7 @@
 from collections import deque
 import cv2
 import numpy as np
+from api_code import *
 from ultralytics import YOLO
 
 # --- SPEED SIGN CONFIGURATION ---
@@ -114,6 +115,7 @@ def create_dynamic_speed_sign(
 
     return canvas
 
+generateWeather()
 
 # Load YOLO Model
 model = YOLO("yolov8n.pt")
@@ -323,7 +325,8 @@ while cap.isOpened():
         num_cars = len(track_ids) if results[0].boxes.id is not None else 0
         
         # Lower speed limit during high traffic density (e.g., 3 or more vehicles)
-        SPEED_LIMIT = baseSpeed - num_cars
+        weatherResult = getWeather()
+        SPEED_LIMIT = int(baseSpeed - num_cars - weatherResult["rain_mm"] - weatherResult["snowfall_cm"])
     
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
