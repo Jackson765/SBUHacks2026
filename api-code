@@ -25,8 +25,11 @@ params = {
     "wind_speed_unit": "mph",
     "timezone": "America/New_York"
 }
+rain = 0
+snow = 0
 
 def get_current_weather():
+    global rain, snow
     try:
         response = requests.get(
             URL,
@@ -57,6 +60,9 @@ def get_current_weather():
             "wind_speed_mph": weather["wind_speed_10m"]
         }
 
+        snow = result["snowfall_cm"]
+        rain = result["rain_mm"]
+
         print("Current Weather Conditions")
         print(json.dumps(result, indent=4))
 
@@ -66,6 +72,9 @@ def get_current_weather():
         print(f"Could not retrieve weather: {error}")
         return None
 
+def getWeather():
+    global rain, snow
+    return [rain, snow]
 
 if __name__ == "__main__":
     get_current_weather()
