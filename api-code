@@ -1,0 +1,71 @@
+
+import requests
+import json
+
+# Example coordinates: Stony Brook, New York
+LATITUDE = 40.91
+LONGITUDE = -73.14
+
+URL = "https://api.open-meteo.com/v1/forecast"
+
+params = {
+    "latitude": LATITUDE,
+    "longitude": LONGITUDE,
+    "current": [
+        "temperature_2m",
+        "relative_humidity_2m",
+        "apparent_temperature",
+        "precipitation",
+        "rain",
+        "snowfall",
+        "weather_code",
+        "wind_speed_10m"
+    ],
+    "temperature_unit": "fahrenheit",
+    "wind_speed_unit": "mph",
+    "timezone": "America/New_York"
+}
+
+def get_current_weather():
+    try:
+        response = requests.get(
+            URL,
+            params=params,
+            timeout=10
+        )
+
+        response.raise_for_status()
+        data = response.json()
+
+        weather = data["current"]
+
+        result = {
+            "time": weather["time"],
+            "temperature_f": weather["temperature_2m"],
+            "humidity_percent": weather[
+                "relative_humidity_2m"
+            ],
+            "feels_like_f": weather[
+                "apparent_temperature"
+            ],
+            "precipitation_mm": weather[
+                "precipitation"
+            ],
+            "rain_mm": weather["rain"],
+            "snowfall_cm": weather["snowfall"],
+            "weather_code": weather["weather_code"],
+            "wind_speed_mph": weather["wind_speed_10m"]
+        }
+
+        print("Current Weather Conditions")
+        print(json.dumps(result, indent=4))
+
+        return result
+
+    except (requests.RequestException, KeyError, ValueError) as error:
+        print(f"Could not retrieve weather: {error}")
+        return None
+
+
+if __name__ == "__main__":
+    get_current_weather()
