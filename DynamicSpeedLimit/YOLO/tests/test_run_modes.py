@@ -20,9 +20,160 @@ from calibration import RoadCalibration
 from video_settings import VideoSettingsStore
 from speed_windows import FiveMinuteAverages
 from video_calibration import VideoCalibrationControls
+from video_input import VideoClock
+from realtime_playback import RealtimePlaybackClock
 
 
 class RunModeTests(unittest.TestCase):
+    def test_quick_entry_point_disables_pacing_without_mutating_args(self):
+        for full_analysis in (None, False, True):
+            with self.subTest(full_analysis=full_analysis):
+                args = SimpleNamespace(visual=False, calibrate=False, real_time=True)
+                if full_analysis is not None:
+                    args.full_analysis = full_analysis
+                original = vars(args).copy()
+                with patch('main.process_video', return_value='quick result') as process:
+                    result = main.process_video_quick(None, None, 0, None, None, None, None, args)
+                self.assertEqual(result, 'quick result')
+                actual = process.call_args.args[7]
+                self.assertFalse(actual.real_time)
+                self.assertEqual(actual.full_analysis, bool(full_analysis))
+                self.assertEqual(vars(args), original)
+
+    def test_realtime_entry_point_sets_full_frame_pacing_without_mutating_args(self):
+        args = SimpleNamespace(visual=False, calibrate=False, full_analysis=False, real_time=False)
+        with patch('main.process_video', return_value='result') as process:
+            result = main.process_video_realtime(None, None, 0, None, None, None, None, args)
+        self.assertEqual(result, 'result')
+        actual = process.call_args.args[7]
+        self.assertTrue(actual.real_time)
+        self.assertTrue(actual.full_analysis)
+        self.assertFalse(args.real_time)
+        self.assertFalse(args.full_analysis)
+
+    def test_cli_real_time_selects_dedicated_entry_point(self):
+        with tempfile.TemporaryDirectory() as temp, contextlib.ExitStack() as stack:
+            video = Path(temp) / 'clip.mp4'
+            video.touch()
+            capture = Mock()
+            capture.isOpened.return_value = True
+            capture.read.return_value = True, np.zeros((500, 500, 3), np.uint8)
+            capture.get.side_effect = lambda prop: 10 if prop == cv2.CAP_PROP_FPS else 0
+            settings = Mock()
+            settings.source, settings.ratio, settings.base_speed_limit = 'saved settings', 1, 30
+            stack.enter_context(patch('main.cv2.VideoCapture', return_value=capture))
+            stack.enter_context(patch('main.VideoSettingsStore', return_value=Mock(load=Mock(return_value=settings))))
+            real_time = stack.enter_context(patch('main.process_video_realtime', return_value='paced result'))
+            quick = stack.enter_context(patch('main.process_video'))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            result = main.main(['--real-time', '--video', str(video)])
+            self.assertEqual(result, 'paced result')
+            real_time.assert_called_once()
+            self.assertTrue(real_time.call_args.args[7].real_time)
+            quick.assert_not_called()
+            capture.release.assert_called_once()
+
+    def test_realtime_windows_wait_for_five_ten_and_fifteen_wall_minutes(self):
+        frame = np.zeros((120, 160, 3), np.uint8)
+        settings = SimpleNamespace(calibration=RoadCalibration(
+            [[20, 20], [140, 20], [140, 100], [20, 100]], 12, 20), ratio=1, base_speed_limit=30)
+        args = SimpleNamespace(visual=False, calibrate=False, full_analysis=False, weather=False)
+        capture = Mock()
+        capture.read.return_value = True, frame
+        capture.get.side_effect = [300000, 600000, 900000]
+        detector = Mock()
+        detector.track.return_value = [SimpleNamespace(boxes=None)]
+        now = [0.0]
+
+        def sleep(delay):
+            now[0] += delay
+
+        pacing = RealtimePlaybackClock(clock=lambda: now[0], sleeper=sleep)
+        observations = []
+
+        def observe(elapsed, collector, frame, vehicles):
+            observations.append((elapsed, now[0], len(collector.windows)))
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch('main.RealtimePlaybackClock', return_value=pacing))
+            stack.enter_context(patch('main.FRAME_SKIP', 1))
+            stack.enter_context(patch('main.YOLO_MODEL_PATH', Path(__file__)))
+            stack.enter_context(patch('main.make_simulation_plan', side_effect=AssertionError('Fast plan used')))
+            stack.enter_context(patch.dict(sys.modules, {'ultralytics': SimpleNamespace(YOLO=Mock(return_value=detector))}))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            main.process_video_realtime(capture, frame, 0, VideoClock(0), None, settings, None, args,
+                                        observer=observe)
+        self.assertEqual([item[0] for item in observations], [0, 300, 600, 900])
+        self.assertEqual([item[2] for item in observations], [0, 1, 2, 3])
+        for elapsed, wall, _ in observations:
+            self.assertAlmostEqual(elapsed, wall)
+        self.assertGreaterEqual(now[0], 900)
+
+    def run_thirty_fps_timeline(self, real_time):
+        """Run the real loop over three seconds of 30-FPS decoded timestamps."""
+        frame = np.zeros((120, 160, 3), np.uint8)
+        settings = SimpleNamespace(calibration=RoadCalibration(
+            [[20, 20], [140, 20], [140, 100], [20, 100]], 12, 20), ratio=1, base_speed_limit=30)
+        args = SimpleNamespace(visual=False, calibrate=False, full_analysis=False, weather=False)
+        state = {'index': 0, 'wall': 0.0}
+        waits, observations = [], []
+
+        def advance():
+            state['index'] += 1
+            return state['index'] < 90
+
+        capture = Mock()
+        capture.read.side_effect = lambda: (advance(), frame)
+        capture.grab.side_effect = advance
+        capture.get.side_effect = lambda prop: state['index'] * 1000 / 30
+        detector = Mock()
+        detector.track.return_value = [SimpleNamespace(boxes=None)]
+
+        def sleep(delay):
+            waits.append(delay)
+            state['wall'] += delay
+
+        def observe(elapsed, collector, preview_frame, vehicles):
+            observations.append((elapsed, state['wall'], preview_frame is not None))
+
+        with contextlib.ExitStack() as stack:
+            if real_time:
+                pacing = RealtimePlaybackClock(clock=lambda: state['wall'], sleeper=sleep)
+                stack.enter_context(patch('main.RealtimePlaybackClock', return_value=pacing))
+                stack.enter_context(patch('main.make_simulation_plan', side_effect=AssertionError('Fast plan used')))
+            else:
+                stack.enter_context(patch('main.RealtimePlaybackClock', side_effect=AssertionError('Quick mode paced')))
+            stack.enter_context(patch('main.FRAME_SKIP', 2))
+            stack.enter_context(patch('main.YOLO_MODEL_PATH', Path(__file__)))
+            stack.enter_context(patch.dict(sys.modules, {'ultralytics': SimpleNamespace(YOLO=Mock(return_value=detector))}))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            processor = main.process_video_realtime if real_time else main.process_video_quick
+            processor(capture, frame, 0, VideoClock(30, source='video'), None, settings, None, args,
+                      observer=observe)
+        return state, waits, observations, detector, capture
+
+    def test_regular_thirty_fps_timeline_publishes_every_frame_at_source_speed(self):
+        state, waits, observations, detector, capture = self.run_thirty_fps_timeline(True)
+        published = [item for item in observations if item[2]]
+        self.assertEqual(len(published), 90)
+        for index, (elapsed, wall, _) in enumerate(published):
+            self.assertAlmostEqual(elapsed, index / 30)
+            self.assertGreaterEqual(wall + 1e-9, elapsed)
+        self.assertAlmostEqual(observations[-1][0], 3)
+        self.assertAlmostEqual(state['wall'], 3)
+        self.assertAlmostEqual(sum(waits), 3)
+        self.assertEqual(detector.track.call_count, 45)
+        capture.grab.assert_not_called()
+
+    def test_quick_thirty_fps_timeline_can_finish_without_wall_waits(self):
+        state, waits, observations, detector, capture = self.run_thirty_fps_timeline(False)
+        self.assertAlmostEqual(observations[-1][0], 3)
+        self.assertEqual(state['wall'], 0)
+        self.assertEqual(waits, [])
+        self.assertLess(len([item for item in observations if item[2]]), 90)
+        self.assertGreater(detector.track.call_count, 0)
+        self.assertGreater(capture.grab.call_count, 0)
+
     def test_paused_calibration_reprojects_speed_and_saves_without_more_inference(self):
         with tempfile.TemporaryDirectory() as temp, contextlib.ExitStack() as stack:
             video = Path(temp) / 'clip.mp4'
@@ -95,7 +246,8 @@ class RunModeTests(unittest.TestCase):
             self.assertAlmostEqual(panel.call_args.args[0], 20 * 2.2369362921, delta=.001)
             self.assertTrue(all(call.args[1] == 45 for call in panel.call_args_list))
             self.assertEqual(save.call_count, 2)
-            settings = VideoSettingsStore(Path(temp) / 'calibration.json').load(video, (500, 500))
+            self.assertFalse((Path(temp) / 'calibration.json').exists())
+            settings = VideoSettingsStore(Path(temp) / 'calibrationtemp.json').load(video, (500, 500))
             saved = settings.calibration
             self.assertEqual((settings.ratio, settings.base_speed_limit), (3, 45))
             self.assertEqual((saved.road_width_m, saved.road_length_m), (80, 160))

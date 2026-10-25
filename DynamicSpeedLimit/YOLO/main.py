@@ -1,5 +1,6 @@
 """Analyze prerecorded traffic videos or calibrate them during playback."""
 import argparse
+from copy import copy
 import json
 import os
 from pathlib import Path
@@ -22,8 +23,9 @@ from ratio_predict import prompt_ratio, validate_ratio, scale_average_speeds, pr
 from speed_windows import WINDOW_SECONDS, FiveMinuteAverages
 from simulation import make_simulation_plan
 from video_input import VideoClock, choose_video, playback_key, read_initial_frame, resize_for_processing
-from video_settings import VideoSettings, VideoSettingsStore, prompt_base_speed_limit
+from video_settings import VideoSettings, WorkingVideoSettingsStore as VideoSettingsStore, prompt_base_speed_limit
 from ui import compose_playback
+from realtime_playback import RealtimePlaybackClock
 
 
 def report_windows(windows, ratio):
@@ -74,14 +76,36 @@ def display_weather_advisory(forecast, base_speed_limit):
         return None
 
 
-def process_video(cap, first_frame, first_timestamp_msec, clock, video_path, settings, store, args):
+def process_video_quick(cap, first_frame, first_timestamp_msec, clock, video_path, settings, store, args,
+                        *, observer=None, should_stop=None):
+    """Run analysis without wall-clock pacing; keep the optional full-analysis setting."""
+    quick_args = copy(args)
+    quick_args.real_time = False
+    quick_args.full_analysis = getattr(args, "full_analysis", False)
+    return process_video(cap, first_frame, first_timestamp_msec, clock, video_path, settings, store,
+                         quick_args, observer=observer, should_stop=should_stop)
+
+
+def process_video_realtime(cap, first_frame, first_timestamp_msec, clock, video_path, settings, store, args,
+                           *, observer=None, should_stop=None):
+    """Use full-frame detection and paced playback, without the fast simulation plan."""
+    playback_args = copy(args)
+    playback_args.real_time = True
+    playback_args.full_analysis = True
+    return process_video(cap, first_frame, first_timestamp_msec, clock, video_path, settings, store,
+                         playback_args, observer=observer, should_stop=should_stop)
+
+
+def process_video(cap, first_frame, first_timestamp_msec, clock, video_path, settings, store, args,
+                  *, observer=None, should_stop=None):
     """One inference/measurement loop shared by analysis and both preview modes."""
     visual = args.visual or args.calibrate
+    real_time = getattr(args, "real_time", False)
     fps = clock.fps
     frame_size = (first_frame.shape[1], first_frame.shape[0])
     calibration, ratio, base_speed_limit = settings.calibration, settings.ratio, settings.base_speed_limit
     plan = None
-    if not visual and not args.full_analysis:
+    if not real_time and not visual and not args.full_analysis:
         plan = make_simulation_plan(frame_size, calibration.points, fps,
                                     target_fps=SIMULATION_TARGET_FPS, padding=SIMULATION_ROAD_PADDING,
                                     maximum_image_size=DETECTION_IMAGE_SIZE, fallback_step=FRAME_SKIP)
@@ -106,17 +130,25 @@ def process_video(cap, first_frame, first_timestamp_msec, clock, video_path, set
     collection_offset = 0.0
     last_progress_minute = -1
     started = last_wall_progress = perf_counter()
+    playback_clock = RealtimePlaybackClock() if real_time else None
+    if real_time:
+        print("Real-time playback: full-frame detection; source time cannot advance faster than wall time.", flush=True)
     detection_frames = 0
     paused = save_requested = False
     tracked_boxes = []
     print(f"Collecting three five-minute windows of VIDEO time; speed multiplier: {ratio:g}.")
     frame, position_msec, frame_index = first_frame, first_timestamp_msec, 0
     while True:
+        if should_stop is not None and should_stop():
+            return None
         timestamp = clock.timestamp(frame_index, position_msec)
         if origin is None:
             origin = timestamp
         elapsed = timestamp - origin
         collection_elapsed = elapsed - collection_offset
+        if playback_clock is not None and not playback_clock.wait(
+                min(elapsed, collection_offset + 3 * WINDOW_SECONDS), should_stop):
+            return None
         report_windows(collector.advance(collection_elapsed), ratio)
         if collector.complete:
             break
@@ -131,7 +163,8 @@ def process_video(cap, first_frame, first_timestamp_msec, clock, video_path, set
                   f"(video {seconds//60:02d}:{seconds%60:02d}/15:00; wall {duration:.1f}s; "
                   f"{rate:.1f}x video speed; {detection_frames} detection frames).", flush=True)
             last_progress_minute, last_wall_progress = minute, wall_now
-        if frame_index % frame_step == 0:
+        detection_frame_due = frame_index % frame_step == 0
+        if detection_frame_due:
             frame = resize_for_processing(frame)
             detection_frame = plan.crop(frame) if plan is not None else frame
             result = model.track(detection_frame, classes=VEHICLE_CLASSES, conf=DETECTION_CONFIDENCE,
@@ -153,6 +186,9 @@ def process_video(cap, first_frame, first_timestamp_msec, clock, video_path, set
                     vehicles.append((box, track_id, speed))
             tracker.remove_inactive_tracks(timestamp)
             collector.add_measurements(collection_elapsed, [(track_id, speed) for _, track_id, speed in vehicles])
+        if observer is not None and frame is not None:
+            frame = resize_for_processing(frame)
+            observer(collection_elapsed, collector, frame, vehicles if detection_frame_due else None)
         if visual:
             # Show each decoded frame; reuse the last detections on skipped
             # inference frames without adding speed samples or model calls.
@@ -213,10 +249,16 @@ def process_video(cap, first_frame, first_timestamp_msec, clock, video_path, set
         else:
             ok, frame = cap.read()
         if not ok:
-            report_windows(collector.advance(clock.end_timestamp()-origin-collection_offset), ratio)
+            end_elapsed = clock.end_timestamp() - origin
+            if playback_clock is not None and not playback_clock.wait(
+                    min(end_elapsed, collection_offset + 3 * WINDOW_SECONDS), should_stop):
+                return None
+            report_windows(collector.advance(end_elapsed-collection_offset), ratio)
             break
         position_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
         frame_index += 1
+    if observer is not None:
+        observer(collector._last_time, collector, None, [])
     if collector.complete:
         print(f"Processed 15 minutes of source video in {perf_counter()-started:.2f}s; {detection_frames} detection frames.", flush=True)
         forecast = forecast_collected_averages(collector.averages, ratio)
@@ -233,6 +275,8 @@ def main(argv=None):
     parser.add_argument("--calibrate", "--recalibrate", dest="calibrate", action="store_true",
                         help="Set up a video, then edit calibration during playback; S saves")
     parser.add_argument("--full-analysis", action="store_true", help="Use full-frame detection and FRAME_SKIP sampling (slower)")
+    parser.add_argument("--real-time", action="store_true",
+                        help="Use full-frame detection and pace playback to source time; may run slower if inference lags")
     parser.add_argument("--ratio", type=float, help="Override the saved ratio for this run")
     parser.add_argument("--weather", action="store_true", help="Fetch weather and show an advisory after prediction")
     source = parser.add_mutually_exclusive_group()
@@ -252,6 +296,8 @@ def main(argv=None):
     if not isinstance(FRAME_SKIP, int) or FRAME_SKIP < 1:
         raise ValueError("FRAME_SKIP must be a positive integer.")
     mode = "editable calibration" if args.calibrate else "locked playback" if visual else "fast analysis"
+    if args.real_time:
+        mode = f"real-time {mode}" if visual else "real-time analysis"
     print(f"{video_path.name}: {mode}.", flush=True)
     store = VideoSettingsStore(CALIBRATION_PATH)
     cap = cv2.VideoCapture(str(video_path))
@@ -274,7 +320,8 @@ def main(argv=None):
         else:
             settings = store.load(video_path, frame_size, args.ratio)
         print(f"Using {settings.source}; ratio {settings.ratio:g}; fixed speed limit {settings.base_speed_limit} mph.", flush=True)
-        return process_video(cap, first_frame, first_timestamp_msec, clock, video_path, settings, store, args)
+        processor = process_video_realtime if args.real_time else process_video_quick
+        return processor(cap, first_frame, first_timestamp_msec, clock, video_path, settings, store, args)
     finally:
         cap.release()
         if visual:

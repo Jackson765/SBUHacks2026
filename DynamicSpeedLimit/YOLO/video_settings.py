@@ -123,3 +123,39 @@ class VideoSettingsStore:
         temporary.write_text(json.dumps(self.data, indent=2, allow_nan=False) + "\n", encoding="utf-8")
         temporary.replace(self.path)
         print(f"Saved settings for {Path(video_path).name} to {self.path}.", flush=True)
+
+
+class WorkingVideoSettingsStore(VideoSettingsStore):
+    """Read defaults from calibration.json; save edits only to calibrationtemp.json."""
+
+    def __init__(self, baseline_path=CALIBRATION_PATH, temp_path=None):
+        baseline_path = Path(baseline_path)
+        temp_path = Path(temp_path) if temp_path is not None else baseline_path.with_name("calibrationtemp.json")
+        if baseline_path.resolve() == temp_path.resolve():
+            raise ValueError("Default and working calibration files must have different paths.")
+        self.baseline = VideoSettingsStore(baseline_path)
+        super().__init__(temp_path)
+
+    def entry(self, video_path):
+        saved = self.data["profiles"].get(self.key(video_path))
+        if saved is not None and not isinstance(saved, dict):
+            raise ValueError(f"Invalid working settings for {Path(video_path).name!r}; recalibrate or revert to default.")
+        if saved is not None and saved.get("video") == video_identity(video_path):
+            return saved, "saved settings"
+        entry, source = self.baseline.entry(video_path)
+        return entry, "default calibration" if source == "saved settings" else source
+
+    def load_default(self, video_path, frame_size):
+        """Use the baseline profile, then the original filename preset."""
+        try:
+            settings = self.baseline.load(video_path, frame_size)
+        except ValueError as error:
+            raise ValueError(f"No valid default calibration for {Path(video_path).name!r}. {error}") from error
+        settings.source = "default calibration"
+        return settings
+
+    def revert_to_default(self, video_path, frame_size):
+        """Replace only this video's working profile; preserve defaults and other videos."""
+        settings = self.load_default(video_path, frame_size)
+        self.save(video_path, frame_size, settings)
+        return settings

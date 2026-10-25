@@ -4,6 +4,7 @@ from pathlib import Path
 YOLO_DIR = Path(__file__).resolve().parent
 VIDEO_PATH = YOLO_DIR.parent / "traffic" / "traffic4.mp4"
 YOLO_MODEL_PATH = YOLO_DIR / "yolov8n.pt"
+# Read-only baseline. Browser and desktop edits go to sibling calibrationtemp.json.
 CALIBRATION_PATH = YOLO_DIR / "calibration.json"
 VIDEO_DEFAULTS_PATH = YOLO_DIR / "video_defaults.json"
 WINDOW_NAME = "Stabilized Dynamic Speed Sign System"

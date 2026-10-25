@@ -1,0 +1,4 @@
+data/
+.test-deps/
+__pycache__/
+.qa/

@@ -1,0 +1,14 @@
+.git
+.conda
+.vscode
+**/__pycache__
+backend/.test-deps
+backend/data
+YOLO/calibration.json
+YOLO/calibration.tmp
+YOLO/calibrationtemp.json
+YOLO/calibrationtemp.tmp
+backend/.qa
+YOLO/runs
+model_b/data
+NOTES.md

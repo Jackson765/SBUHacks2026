@@ -1,5 +1,10 @@
 # Calibrated video speeds and prediction
 
+The browser dashboard now lives in `frontend/index.html`, served by
+`python -m backend.app` from the project root. See [the project README](../README.md)
+for installation, browser calibration, API routes, and Docker/Render hosting.
+The desktop commands below remain available.
+
 Run from the project root in the existing `dynamic-speed` environment:
 
 ```powershell
@@ -21,6 +26,11 @@ python YOLO/main.py --weather
 
 # Use full-frame inference and the original FRAME_SKIP sampling.
 python YOLO/main.py --full-analysis
+
+# Pace full-frame analysis so source time never advances faster than wall time.
+python YOLO/main.py --real-time
+python YOLO/main.py --visual --real-time
+python YOLO/main.py --calibrate --real-time
 ```
 
 `--visual` locks calibration during playback. `--calibrate` enables calibration
@@ -44,14 +54,18 @@ specified.
 
 `YOLO/video_defaults.json` contains the original filename presets, migrated
 without changing their values. This file is tracked with the application.
-`YOLO/calibration.json` is the local per-video settings store (version 2), ignored
-by Git. Its `profiles` object holds saved settings keyed by absolute video path,
+`YOLO/calibration.json` is the read-only baseline (version 2), ignored by Git.
+`YOLO/calibrationtemp.json` holds working profiles saved by browser/desktop
+calibration. Both use a `profiles` object keyed by absolute video path,
 including file size/modification time and processing size. The previous saved
 profile was retained, and older version-1 profiles also load without losing
 geometry or run settings. Files without calibrated dimensions need `--calibrate`
 before analysis. Each settings file is read once per run.
 
-All modes use matching saved settings first, then the migrated filename defaults.
+All modes use matching working settings first, then baseline profiles, then the
+migrated filename defaults. Browser **Revert to default** copies the selected
+video's baseline (or original filename preset) into `calibrationtemp.json`,
+preserving the baseline and other working profiles.
 `--ratio 2` overrides the selected ratio for that run without changing the saved
 profile. A profile for a replaced file is ignored; a resolution mismatch requires
 recalibration. The ratio stays fixed in normal analysis and locked playback.
@@ -89,7 +103,7 @@ entering one forecast. A further 15 minutes of valid video history is needed
 after an edit to complete collection.
 
 Setup and S save geometry, effective dimensions, ratio, and fixed input limit
-atomically to `YOLO/calibration.json`, retaining other videos' profiles. The next
+atomically to `YOLO/calibrationtemp.json`, retaining other videos' profiles. The next
 normal or visual run reuses the saved settings automatically. No source editing
 or copying terminal output is needed.
 
@@ -116,6 +130,16 @@ display conversion. `SIMULATION_TARGET_FPS` and `SIMULATION_ROAD_PADDING` in
 `FRAME_SKIP`; visual playback also uses those settings. Sampling and crop context
 can affect detections and measured averages. Runtime depends on hardware and
 video decoding; visual playback also advances at processing speed.
+
+`--real-time` selects `process_video_realtime`, using full-frame inference and
+`FRAME_SKIP` like calibration playback, without the fast simulation crop or its
+sampling plan. Every decoded frame is paced by source timestamps; slow inference
+can make playback slower, but it never catches up in accelerated bursts. EOF
+also waits out the final frame's validated duration. Stop cancels timing waits
+within 50 ms (an in-flight detector call must still finish). This flag also works
+with `--visual` or `--calibrate`; pauses do not create a catch-up backlog. The
+browser selects the same method when **Quick analysis** is unchecked. Plain
+`--calibrate` retains its existing processing-speed playback.
 
 All collection boundaries use **video time**, independently of wall time:
 

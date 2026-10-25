@@ -177,7 +177,7 @@ class VideoPresetTests(unittest.TestCase):
             for prompt in prompts:
                 prompt.assert_not_called()
             self.assertIn(f'speed multiplier: {ratio}', output.getvalue())
-            self.assertIn('Using saved settings' if saved_profile else 'Using migrated defaults', output.getvalue())
+            self.assertIn('Using default calibration' if saved_profile else 'Using migrated defaults', output.getvalue())
             if saved_profile:
                 self.assertEqual(tracker.call_args.args[1:], (25, 70))
             self.assertNotIn('UNVALIDATED DEMO', output.getvalue())
