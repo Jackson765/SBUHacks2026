@@ -102,6 +102,27 @@ class DecisionEngineTests(unittest.TestCase):
                 self.assertLessEqual(result['advisory_speed_mph'], min(limit, result['traffic_cap_mph'], result['weather_cap_mph']))
                 self.assertEqual(result['advisory_speed_mph'] % 5, 0)
 
+    def test_verified_legal_max_allows_normal_traffic_advisory_above_base(self):
+        result = self.decide(50, limit=30, free_flow=55, legal_max_speed_mph=70)
+        self.assertEqual(result['traffic_cap_mph'], 55)
+        self.assertEqual(result['weather_cap_mph'], 70)
+        self.assertEqual(result['candidate_speed_mph'], 55)
+        self.assertEqual(result['advisory_speed_mph'], 55)
+        self.assertEqual(result['base_speed_limit_mph'], 30)
+        self.assertEqual(result['legal_max_speed_mph'], 70)
+
+        rain = observation(weather_code=61, rain_mm=.1, precipitation_mm=.1)
+        result = self.decide(50, weather=rain, limit=30, free_flow=55, legal_max_speed_mph=70)
+        self.assertEqual(result['advisory_speed_mph'], 55)
+        self.assertLessEqual(result['advisory_speed_mph'], result['weather_cap_mph'])
+
+    def test_legal_maximum_is_a_hard_cap_and_cannot_be_below_base(self):
+        result = self.decide(100, limit=60, free_flow=80, legal_max_speed_mph=70)
+        self.assertEqual(result['advisory_speed_mph'], 70)
+        invalid = self.decide(50, limit=60, free_flow=80, legal_max_speed_mph=55)
+        self.assertEqual(invalid['status'], 'insufficient_data')
+        self.assertIsNone(invalid['advisory_speed_mph'])
+
     def test_missing_stale_incompatible_weather_never_becomes_clear(self):
         cases = [dict(temperature_f=None), dict(weather_code=999), dict(precipitation_mm=float('nan')),
                  dict(location=None), dict(units=None), dict(interval_seconds=3600),

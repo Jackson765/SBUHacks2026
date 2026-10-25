@@ -8,6 +8,7 @@ YOLO/calibration.json
 YOLO/calibration.tmp
 YOLO/calibrationtemp.json
 YOLO/calibrationtemp.tmp
+YOLO/calibrationtemp.invalid-*.json
 backend/.qa
 YOLO/runs
 model_b/data

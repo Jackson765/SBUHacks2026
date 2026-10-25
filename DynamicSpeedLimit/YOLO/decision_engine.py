@@ -93,11 +93,14 @@ def classify_weather(weather, limit, policy):
 
 def evaluate_advisory(predicted_speed_mph, free_flow_speed_mph, posted_limit_mph, weather,
                       road_type=None, *, policy=None, prediction_age_seconds=0,
-                      prediction_units="mph", prediction_calibrated=True):
+                      prediction_units="mph", prediction_calibrated=True,
+                      legal_max_speed_mph=None):
     """Consume final local mph without invoking Model B or consulting a clock.
 
-    Weather includes explicit units/location/observed_at/checked_at. Callers must
-    supply a fresh checked_at (the API client does so even on cache hits).
+    ``posted_limit_mph`` is the configured base reference. When supplied,
+    ``legal_max_speed_mph`` is the hard recommendation ceiling. Weather includes
+    explicit units/location/observed_at/checked_at; callers supply a fresh
+    checked_at (the API client does so even on cache hits).
     """
     settings = dict(ADVISORY_POLICY)
     if policy is not None:
@@ -106,7 +109,8 @@ def evaluate_advisory(predicted_speed_mph, free_flow_speed_mph, posted_limit_mph
                   weather_cap_mph=None, candidate_speed_mph=None, advisory_speed_mph=None,
                   status="insufficient_data", controlling_factor="unavailable", reasons=[],
                   warnings=[])
-    p, f, limit = map(number, (predicted_speed_mph, free_flow_speed_mph, posted_limit_mph))
+    p, f, base_limit = map(number, (predicted_speed_mph, free_flow_speed_mph, posted_limit_mph))
+    legal_limit = number(legal_max_speed_mph) if legal_max_speed_mph is not None else base_limit
     age = number(prediction_age_seconds)
     for key in settings:
         if key != "allow_unsupported_road_demo":
@@ -122,11 +126,13 @@ def evaluate_advisory(predicted_speed_mph, free_flow_speed_mph, posted_limit_mph
             or any(settings[k] < 0 for k in settings if k.endswith(("reduction_mph", "age_seconds", "tolerance_seconds")))):
         result["warnings"].append("Invalid demo policy configuration.")
         return result
-    if (p is None or f is None or limit is None or p < 0 or f <= 0 or limit <= 0
+    if (p is None or f is None or base_limit is None or legal_limit is None
+            or p < 0 or f <= 0 or base_limit <= 0 or legal_limit < base_limit
             or age is None or age < 0 or age > settings["prediction_max_age_seconds"]
             or prediction_units != "mph" or not prediction_calibrated):
         result["warnings"].append("Awaiting a finite, nonnegative, fresh, calibrated local-mph prediction and positive road parameters.")
         return result
+    result.update(base_speed_limit_mph=base_limit, legal_max_speed_mph=legal_limit)
     ratio = p / f
     if not math.isfinite(ratio):
         result["warnings"].append("Traffic ratio overflow; check road parameters.")
@@ -137,15 +143,16 @@ def evaluate_advisory(predicted_speed_mph, free_flow_speed_mph, posted_limit_mph
         reduction, condition = settings["moderate_reduction_mph"], "moderate predicted slowdown"
     else:
         reduction, condition = settings["severe_reduction_mph"], "severe predicted slowdown"
-    traffic_cap = limit - reduction
+    traffic_reference = min(f, legal_limit) if legal_max_speed_mph is not None else base_limit
+    traffic_cap = traffic_reference - reduction
     result.update(traffic_ratio=ratio, traffic_cap_mph=traffic_cap)
     result["reasons"] += [f"Predicted speed {p:.1f} mph is {ratio:.0%} of {f:.1f} mph normal flow ({condition}).",
                           f"Traffic rule caps the demo advisory at {traffic_cap:g} mph."]
-    category, cap, reasons, warnings = classify_weather(weather, limit, settings)
+    category, cap, reasons, warnings = classify_weather(weather, legal_limit, settings)
     result.update(weather_category=category, weather_cap_mph=cap)
     result["reasons"] += reasons
     result["warnings"] += warnings
-    unsupported = limit < settings["minimum_supported_limit_mph"] or road_type not in {"freeway", "motorway"}
+    unsupported = legal_limit < settings["minimum_supported_limit_mph"] or road_type not in {"freeway", "motorway"}
     if unsupported:
         result["warnings"].append("Unsupported/unknown road: freeway-oriented demo reductions are not validated for local or signalized roads.")
     if category == "severe" or (unsupported and not settings["allow_unsupported_road_demo"]) or traffic_cap < 5 or (cap is not None and cap < 5):
@@ -155,15 +162,18 @@ def evaluate_advisory(predicted_speed_mph, free_flow_speed_mph, posted_limit_mph
     if unsupported:
         result["warnings"].append("EXPLICIT UNSUPPORTED-ROAD DEMO OVERRIDE - illustrative only, not a safe-road policy.")
     if category == "unavailable":
-        result.update(status="partial_data", candidate_speed_mph=min(limit, traffic_cap), controlling_factor="unavailable")
+        result.update(status="partial_data", candidate_speed_mph=min(legal_limit, traffic_cap), controlling_factor="unavailable")
         result["reasons"].append("Traffic-only candidate; weather unavailable, so no combined advisory is supplied.")
         return result
-    candidate = min(limit, traffic_cap, cap)
+    candidate = min(legal_limit, traffic_cap, cap)
     factor = "none"
-    if traffic_cap < limit or cap < limit:
+    if traffic_cap < legal_limit or cap < legal_limit:
         factor = "both" if traffic_cap == cap else "traffic" if traffic_cap < cap else "weather"
     advisory = math.floor(candidate / settings["increment_mph"]) * settings["increment_mph"]
     result.update(candidate_speed_mph=candidate, advisory_speed_mph=advisory,
                   status="demo_advisory", controlling_factor=factor)
+    result["reasons"].append(
+        f"Base speed {base_limit:g} mph; recommendations are capped at the verified {legal_limit:g} mph legal maximum."
+    )
     result["reasons"].append(f"{factor.capitalize()} controls the {advisory:g}-mph demo advisory; quantized downward to 5 mph.")
     return result

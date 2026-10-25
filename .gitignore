@@ -4,5 +4,6 @@ calibration.json
 calibration.tmp
 calibrationtemp.json
 calibrationtemp.tmp
+calibrationtemp.invalid-*.json
 runs/
 .conda/

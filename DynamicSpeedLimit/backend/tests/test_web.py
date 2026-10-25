@@ -1,6 +1,7 @@
 """HTTP integration using real generated video, without downloading models."""
 import io
 import json
+import base64
 from pathlib import Path
 import sys
 import tempfile
@@ -11,7 +12,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from backend.app import create_app
+from backend.app import create_app, speed_limit_result
 import cv2
 import numpy as np
 from speed_windows import FiveMinuteAverages
@@ -36,7 +37,7 @@ class WebTests(unittest.TestCase):
         self.video_id = "sample:test.avi"
         self.base = f"/api/videos/{self.video_id}"
         self.settings = dict(points=[[20, 20], [140, 20], [140, 100], [20, 100]],
-                             road_width_m=12, road_length_m=20, ratio=2, base_speed_limit=30)
+                             road_width_m=12, road_length_m=20, ratio=30/45, base_speed_limit=30)
 
     def tearDown(self):
         self.app.extensions["analysis_state"]["cancel"].set()
@@ -88,6 +89,13 @@ class WebTests(unittest.TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"<!doctype html>", response.data)
+        self.assertIn(b'id="showVehicleBoxes"', response.data)
+        self.assertIn(b"Vehicle boxes hidden while analysis catches up", response.data)
+        self.assertNotIn(b'id="weather"', response.data)
+        self.assertNotIn(b"Include weather advisory", response.data)
+        self.assertIn(b"automatically attempted after a forecast", response.data)
+        self.assertIn(b'<details class="card collection-panel">', response.data)
+        self.assertNotIn(b"Current vehicle average", response.data)
         self.assertEqual(response.headers["Cache-Control"], "no-store")
         response.close()
         health = self.client.get("/api/health").get_json()
@@ -166,8 +174,8 @@ class WebTests(unittest.TestCase):
         process.side_effect = self.complete_pipeline
         job = self.finish(self.start())
         settings = process.call_args.args[5]
-        self.assertEqual((settings.calibration.road_width_m, settings.ratio, settings.base_speed_limit), (15, 3, 45))
-        self.assertEqual(job["ratio"], 3)
+        self.assertEqual((settings.calibration.road_width_m, settings.ratio, settings.base_speed_limit), (15, 1, 45))
+        self.assertEqual(job["ratio"], 1)
         self.assertEqual(job["base_speed_limit"], 45)
         self.assertEqual((self.root / "calibration.json").read_bytes(), baseline)
 
@@ -222,7 +230,7 @@ class WebTests(unittest.TestCase):
                             TEMP_SETTINGS_PATH=self.root / "calibration.json"))
 
     def test_invalid_calibration_is_rejected_without_writing(self):
-        cases = [dict(road_width_m=-2), dict(ratio=0), dict(base_speed_limit=30.5),
+        cases = [dict(road_width_m=-2), dict(base_speed_limit=0), dict(base_speed_limit=30.5),
                  dict(points=[[20, 20], [140, 100], [140, 20], [20, 100]]),
                  dict(points=[[-1, 20], [140, 20], [140, 100], [20, 100]])]
         for changes in cases:
@@ -231,6 +239,157 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 400, response.get_json())
         self.assertFalse((self.root / "calibration.json").exists())
         self.assertFalse((self.root / "calibrationtemp.json").exists())
+
+    def test_scale_is_calculated_from_limit_and_ignores_submitted_ratio(self):
+        for limit in (15, 30, 45, 60, 90):
+            with self.subTest(limit=limit):
+                response = self.client.put(self.base + "/settings", json={**self.settings, "base_speed_limit": limit, "ratio": 999})
+                self.assertEqual(response.status_code, 200)
+                saved = self.client.get(self.base).get_json()["settings"]
+                self.assertAlmostEqual(saved["ratio"], limit/45)
+                profiles = json.loads((self.root/"calibrationtemp.json").read_text())["profiles"]
+                self.assertAlmostEqual(profiles[VideoSettingsStore.key(self.video)]["ratio"], limit/45)
+        body = {key: value for key, value in self.settings.items() if key != "ratio"}
+        self.assertEqual(self.client.put(self.base + "/settings", json=body).status_code, 200)
+
+    def test_legacy_profile_ratio_is_replaced_when_loaded_for_browser(self):
+        self.settings["ratio"] = 8
+        baseline = self.seed_default()
+        result = self.client.get(self.base).get_json()["settings"]
+        self.assertAlmostEqual(result["ratio"], 30/45)
+        self.assertEqual((self.root/"calibration.json").read_bytes(), baseline)
+        self.client.post(self.base + "/settings/revert")
+        working = VideoSettingsStore(self.root/"calibrationtemp.json").load(self.video,(160,120))
+        self.assertAlmostEqual(working.ratio, 30/45)
+
+    @patch("backend.app.pipeline.process_video", return_value=None)
+    def test_invalid_or_missing_legacy_ratio_does_not_block_automatic_scale(self, process):
+        self.seed_default()
+        for value in (0, "bad", None, "missing"):
+            with self.subTest(value=value):
+                baseline_path = self.root/"calibration.json"
+                data = json.loads(baseline_path.read_text())
+                entry = data["profiles"][VideoSettingsStore.key(self.video)]
+                if value == "missing":
+                    entry.pop("ratio", None)
+                else:
+                    entry["ratio"] = value
+                baseline_path.write_text(json.dumps(data))
+                baseline_bytes = baseline_path.read_bytes()
+                (self.root/"calibrationtemp.json").unlink(missing_ok=True)
+                response = self.client.get(self.base)
+                self.assertEqual(response.status_code, 200)
+                self.assertFalse(response.get_json()["needs_calibration"])
+                self.assertTrue(response.get_json()["can_revert"])
+                self.assertAlmostEqual(response.get_json()["settings"]["ratio"], 30/45)
+                job = self.finish(self.start())
+                self.assertAlmostEqual(job["ratio"], 30/45)
+                self.assertEqual(self.client.post(self.base+"/settings/revert").status_code, 200)
+                self.assertEqual(baseline_path.read_bytes(), baseline_bytes)
+
+    def test_malformed_working_calibration_loads_defaults_and_can_revert_with_backup(self):
+        baseline = self.seed_default()
+        path = self.root/"calibrationtemp.json"
+        original = b'{malformed json'
+        path.write_bytes(original)
+        response = self.client.get(self.base)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["can_revert"])
+        self.assertFalse(response.get_json()["needs_calibration"])
+        self.assertTrue(response.get_json()["recovery_warning"])
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(self.client.post(self.base+"/settings/revert").status_code, 200)
+        backups = list(self.root.glob("calibrationtemp.invalid-*.json"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), original)
+        self.assertEqual((self.root/"calibration.json").read_bytes(), baseline)
+        self.assertFalse(self.client.get(self.base).get_json()["needs_calibration"])
+
+    def test_malformed_working_file_can_be_replaced_by_new_manual_calibration(self):
+        path = self.root/"calibrationtemp.json"
+        path.write_bytes(b'not json')
+        self.assertTrue(self.client.get(self.base).get_json()["needs_calibration"])
+        self.save()
+        self.assertFalse(self.client.get(self.base).get_json()["needs_calibration"])
+        self.assertEqual(next(self.root.glob("calibrationtemp.invalid-*.json")).read_bytes(), b'not json')
+
+    @patch("backend.app.pipeline.process_video")
+    def test_preview_pairs_frame_and_detections_and_retains_final_frame(self, process):
+        self.save()
+        stage, release = Event(), Event()
+        inside = [40,30,50,60]
+
+        def feed(*args, observer, should_stop):
+            collector = FiveMinuteAverages()
+            observer(0, collector, args[1], [(inside,1,20)])
+            # A newer inference without an encoded JPEG must not change its boxes.
+            with patch("backend.app.monotonic", return_value=0):
+                observer(5, collector, args[1], [(inside,2,45)])
+            stage.set()
+            release.wait(3)
+
+        process.side_effect = feed
+        job_id = self.start()
+        try:
+            self.assertTrue(stage.wait(2))
+            state = self.client.get(f"/api/jobs/{job_id}").get_json()
+            self.assertEqual(state["vehicle_detections_elapsed_seconds"], 5)
+            packet = self.client.get(f"/api/jobs/{job_id}/preview").get_json()
+            self.assertEqual(packet["elapsed_seconds"], 0)
+            self.assertEqual(packet["vehicle_detections_elapsed_seconds"], 0)
+            self.assertEqual(packet["vehicle_detections"][0]["speed_mph"], 20)
+        finally:
+            release.set()
+        self.finish(job_id)
+        final = self.client.get(f"/api/jobs/{job_id}/preview").get_json()
+        self.assertEqual(final["elapsed_seconds"], 5)
+        self.assertEqual(final["vehicle_detections_elapsed_seconds"], 5)
+        self.assertEqual(final["vehicle_detections"][0]["speed_mph"], 45)
+        decoded = cv2.imdecode(np.frombuffer(base64.b64decode(final["image_url"].split(",",1)[1]),np.uint8),cv2.IMREAD_COLOR)
+        self.assertEqual(decoded.shape[:2], (120,160))
+
+    @patch("backend.app.pipeline.process_video")
+    def test_area_counters_are_live_unique_and_reset_for_both_modes(self, process):
+        self.save()
+        inside = [40, 30, 50, 60]
+        outside = [0, 0, 10, 10]
+        edge = [10, 5, 30, 20]
+        for quick in (True, False):
+            stage = Event()
+            release = Event()
+
+            def feed(*args, observer, should_stop):
+                collector = FiveMinuteAverages()
+                observer(0, collector, args[1], [(inside, 1, None), (inside, 2, 40), (outside, 99, 200)])
+                observer(.1, collector, args[1], None)
+                stage.set()
+                release.wait(3)
+                collector.advance(300)
+                observer(300, collector, args[1], [(inside, 1, 40), (inside, 2, 45), (inside, 2, 45), (edge, 3, 0), (outside, 99, 200)])
+                observer(300, collector, None, None)
+
+            process.side_effect = feed
+            job_id = self.start(quick_analysis=quick)
+            try:
+                self.assertTrue(stage.wait(2))
+                live = self.client.get(f"/api/jobs/{job_id}").get_json()
+                self.assertEqual(live["status"], "running")
+                self.assertEqual(live["visible_vehicles"], 2)
+                self.assertEqual(live["detected_vehicle_count"], 2)
+                self.assertEqual(live["speeding_vehicle_count"], 1)
+                self.assertEqual(live["speeding_threshold_mph"], 40)
+                self.assertAlmostEqual(live["ratio"], 30/45)
+                self.assertEqual(len(live["vehicle_detections"]), 2)
+                self.assertEqual(live["vehicle_detections"][0]["box"], [40, 30, 50, 60])
+                self.assertIsNone(live["vehicle_detections"][0]["speed_mph"])
+                self.assertTrue(live["vehicle_detections"][1]["over_limit"])
+            finally:
+                release.set()
+            finished = self.finish(job_id)
+            self.assertEqual(finished["detected_vehicle_count"], 3)
+            self.assertEqual(finished["speeding_vehicle_count"], 2)
+            self.assertEqual(finished["visible_vehicles"], 3)
+            self.assertAlmostEqual(finished["current_average_mph"], 85/3)
 
     def test_upload_decodes_and_requires_its_own_calibration(self):
         response = self.client.post("/api/videos", data={"video": (io.BytesIO(self.video.read_bytes()), "clip.avi")})
@@ -261,7 +420,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 413)
         self.assertIn("error", response.get_json())
 
-    @patch("backend.app.pipeline.display_weather_advisory")
+    @patch("backend.app.pipeline.display_weather_advisory", return_value=None)
     @patch("backend.app.pipeline.process_video")
     def test_completed_job_publishes_averages_forecast_and_preview(self, process, weather):
         self.save()
@@ -271,23 +430,54 @@ class WebTests(unittest.TestCase):
         self.assertEqual(job["status"], "completed")
         self.assertEqual(job["averages"], [20, 25, 30])
         self.assertEqual(job["elapsed_seconds"], 900)
+        self.assertEqual(job["vehicle_detections_elapsed_seconds"], 900)
+        self.assertEqual(job["preview_elapsed_seconds"], 600)
         self.assertEqual(job["forecast"]["predicted_speed"], 27.5)
         self.assertEqual(job["base_speed_limit"], 30)
         self.assertTrue(job["quick_analysis"])
         self.assertFalse(process.call_args.args[7].real_time)
         self.assertFalse(process.call_args.args[7].full_analysis)
-        weather.assert_not_called()
-        self.assertEqual(self.client.get(f"/api/jobs/{job_id}/frame").mimetype, "image/jpeg")
+        weather.assert_called_once_with(job["forecast"], 30)
+        self.assertTrue(job["weather_advisory_enabled"])
+        frame_response = self.client.get(f"/api/jobs/{job_id}/frame")
+        self.assertEqual(frame_response.mimetype, "image/jpeg")
+        self.assertEqual(frame_response.headers["X-Frame-Elapsed"], "600")
+        packet = self.client.get(f"/api/jobs/{job_id}/preview").get_json()
+        self.assertEqual(packet["elapsed_seconds"], 600)
+        self.assertEqual(packet["vehicle_detections_elapsed_seconds"], 600)
+        self.assertFalse(job["speed_limit_result"]["available"])
         self.assertEqual(self.client.get("/api/jobs/current").get_json()["job"]["id"], job_id)
 
     @patch("backend.app.pipeline.display_weather_advisory", return_value=dict(status="manual_review"))
     @patch("backend.app.pipeline.process_video")
-    def test_weather_is_opt_in(self, process, weather):
+    def test_weather_advisory_is_always_enabled_even_for_legacy_false_option(self, process, weather):
         self.save()
         process.side_effect = self.complete_pipeline
-        job = self.finish(self.start(weather=True))
+        job = self.finish(self.start(weather=False))
         self.assertEqual(job["advisory"], dict(status="manual_review"))
+        self.assertTrue(job["weather_advisory_enabled"])
         weather.assert_called_once_with(job["forecast"], 30)
+        self.assertEqual(job["speed_limit_result"]["status"], "manual_review")
+
+    @patch("backend.app.pipeline.display_weather_advisory", return_value=dict(status="demo_advisory",advisory_speed_mph=55))
+    @patch("backend.app.pipeline.process_video")
+    def test_successful_analysis_returns_a_separate_recommended_speed_limit(self, process, weather):
+        self.save()
+        process.side_effect = self.complete_pipeline
+        job = self.finish(self.start())
+        self.assertTrue(job["speed_limit_result"]["available"])
+        self.assertEqual(job["speed_limit_result"]["speed_mph"], 55)
+        self.assertEqual(job["base_speed_limit"], 30)
+
+    def test_result_does_not_promote_forecast_or_partial_candidate_to_a_limit(self):
+        forecast = dict(predicted_speed=55)
+        for advisory in (None,dict(status="partial_data",candidate_speed_mph=55),dict(status="manual_review",advisory_speed_mph=55),dict(status="demo_advisory",advisory_speed_mph=100)):
+            with self.subTest(advisory=advisory):
+                result = speed_limit_result("completed",forecast,advisory,30)
+                self.assertFalse(result["available"])
+                self.assertIsNone(result["speed_mph"])
+        for status in ("cancelled","incomplete","failed"):
+            self.assertFalse(speed_limit_result(status,None,None,30)["available"])
 
     @patch("backend.app.pipeline.process_video_realtime")
     def test_real_time_mode_is_passed_to_pipeline(self, process):

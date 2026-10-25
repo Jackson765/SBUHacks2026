@@ -25,6 +25,53 @@ from realtime_playback import RealtimePlaybackClock
 
 
 class RunModeTests(unittest.TestCase):
+    def test_low_fps_regular_playback_retains_measurable_track_history(self):
+        frame = np.zeros((120,160,3), np.uint8)
+        calibration = RoadCalibration([[20,20],[140,20],[140,100],[20,100]],12,20)
+        settings = SimpleNamespace(calibration=calibration,ratio=1,base_speed_limit=30)
+        args = SimpleNamespace(visual=False,calibrate=False,full_analysis=False,weather=False)
+        state = {'index':0,'wall':0.0}
+        cap = Mock()
+
+        def read():
+            state['index']+=1
+            return state['index']<9,frame
+
+        def track(*args,**kwargs):
+            y=40+4*state['index']/3  # Four pixels per meter; one meter per second.
+            result=Mock()
+            result.boxes.xyxy.cpu.return_value.numpy.return_value=np.array([[45,y-10,55,y]])
+            result.boxes.id.int.return_value.cpu.return_value.tolist.return_value=[1]
+            return [result]
+
+        def sleep(delay):
+            state['wall']+=delay
+
+        cap.read.side_effect=read
+        cap.get.side_effect=lambda prop:state['index']*1000/3
+        detector=Mock(track=Mock(side_effect=track))
+        speeds=[]
+
+        def observe(elapsed,collector,frame,vehicles):
+            speeds.extend(speed for _,_,speed in vehicles or [] if speed is not None)
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch('main.FRAME_SKIP',2))
+            stack.enter_context(patch('main.RealtimePlaybackClock',return_value=RealtimePlaybackClock(clock=lambda:state['wall'],sleeper=sleep)))
+            stack.enter_context(patch('main.YOLO_MODEL_PATH',Path(__file__)))
+            stack.enter_context(patch.dict(sys.modules,{'ultralytics':SimpleNamespace(YOLO=Mock(return_value=detector))}))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            main.process_video_realtime(cap,frame,0,VideoClock(3),None,settings,None,args,observer=observe)
+        self.assertEqual(detector.track.call_count,9)
+        self.assertTrue(speeds)
+        self.assertAlmostEqual(speeds[-1],2.2369362921,places=5)
+
+    def test_tracking_stride_is_safe_for_low_or_unknown_source_fps(self):
+        self.assertEqual(main.tracking_frame_step(3,2),1)
+        self.assertEqual(main.tracking_frame_step(4,2),1)
+        self.assertEqual(main.tracking_frame_step(30,2),2)
+        self.assertEqual(main.tracking_frame_step(0,2),1)
+
     def test_quick_entry_point_disables_pacing_without_mutating_args(self):
         for full_analysis in (None, False, True):
             with self.subTest(full_analysis=full_analysis):

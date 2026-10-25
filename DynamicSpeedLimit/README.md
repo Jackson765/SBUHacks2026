@@ -43,8 +43,9 @@ HTML directly from disk does not run the backend.
    or upload footage (up to 2 GiB). Finished runs do not replace the calibration
    view on page reload; an analysis still running is resumed.
 2. Review the saved calibration. For a new video, drag the four corners to a
-   **measured** road rectangle and enter its width/length in meters, scaling
-   ratio, and fixed input speed limit. Save calibration. Number keys 1–4 select
+   **measured** road rectangle and enter its width/length in meters and base
+   speed. Forecast scaling is automatic: **base speed / 45 mph**;
+   there is no editable scale box. Save calibration. Number keys 1–4 select
    corners; arrow keys move them, with Shift for larger steps.
 3. **Quick analysis starts unchecked**, selecting real-time playback by default.
    The browser plays at **1x using the source frame rate**. A 30 FPS recording
@@ -59,12 +60,43 @@ HTML directly from disk does not run the backend.
    cancels analysis and stops playback.
 4. A forecast requires 15 minutes of video and valid measurements in every
    window. Short clips report incomplete collection. The forecast is for ten
-   minutes after collection ends; it does not change the fixed input limit.
+   minutes after collection ends; it does not change the base speed.
 
 Calibration is fixed during each browser run. To change it, stop analysis, edit
-the fields/corners, save, and start a new run. Current weather is optional and
-applied as a scenario to recorded video. An unavailable advisory preserves the
-traffic forecast.
+the fields/corners, save, and start a new run. After a complete forecast, the
+browser always attempts a current-weather advisory; current weather is a
+scenario applied to recorded footage, not historical weather. An unavailable
+advisory preserves the traffic forecast. The entered base speed is a reference
+for the experimental recommendation, which may exceed that base but is capped
+at the configured 70 mph legal maximum. Unknown road types and severe weather
+still require manual review; this output is not an official speed limit.
+
+When a run finishes, a **Recommended speed limit** card appears. It displays
+the traffic/weather advisory separately from the forecast average and base
+reference. Incomplete or stopped runs, unavailable weather, and manual-review
+conditions show an explanation instead of an invented speed. The card is hidden
+during a new run and cleared when calibration or video selection changes.
+
+The live **10+ mph over base** counter counts each tracked vehicle once
+when a valid measured speed is **at least base speed + 10 mph** inside the
+calibrated area. A 30 mph base therefore counts speeds of 40 mph and above.
+The dashboard separately shows vehicles currently in the area and unique
+vehicles detected there during this run. The bounding box's bottom center is
+the road-contact point used for the area test; points on the polygon boundary
+count as inside. Outside detections are excluded from all three counts and the
+current average. Totals persist if vehicles leave/return with the same tracker
+ID or cross five-minute windows, and reset for each new run. Counts update from
+analyzed footage in either playback mode. Changed tracker IDs can count the
+same physical vehicle again.
+
+Browser saves, profile loads, reverts, and job starts calculate scale on the
+backend from the base speed, ignoring submitted/legacy scale values.
+Legacy scale values are bypassed before validation, including missing or invalid
+values, while geometry, dimensions, and the base speed still require validation.
+For example: 30 mph gives 30/45, 45 mph gives 1, and 60 mph gives 60/45.
+This scale affects forecast transfer only; measured mph and the speeding
+threshold are not multiplied by it. Baseline `calibration.json` stays unchanged;
+saved working settings include the derived scale in `calibrationtemp.json`.
 
 `YOLO/calibration.json` is the read-only baseline. Browser saves and desktop
 calibration saves write to **`YOLO/calibrationtemp.json`**, which takes precedence
@@ -78,6 +110,16 @@ dimensions, ratio, and fixed limit. It saves immediately, refreshes the form,
 and clears old analysis results. Other videos' working profiles are retained.
 The button is disabled during analysis or when a video has no valid default;
 new uploads must be calibrated using measured dimensions.
+
+If `calibrationtemp.json` is unreadable, valid baseline/preset calibration still
+loads. Save or Revert replaces the working file only after preserving its exact
+original contents as `calibrationtemp.invalid-<id>.json` beside it. Reading the
+page does not overwrite the damaged file. The baseline is never rewritten.
+
+Quick preview packets pair an image with its own detection data and timestamps;
+the newest status detections are not applied to an older snapshot. Finishing
+analysis publishes and fetches the final image even when another request is
+already in flight. Regular native-video overlays retain timestamp matching.
 
 Uploaded videos live in ignored `backend/data/uploads/`. By default, calibration
 uses the same ignored `YOLO/calibrationtemp.json` as the CLI. `DATA_DIR` changes the
@@ -153,10 +195,11 @@ task queue. This deployment has no separate frontend build or CORS setup.
 | `GET /api/videos/<id>/media` | Native media or H.264 stream; optional `start` for transcoded resume |
 | `PUT /api/videos/<id>/settings` | Validate and save corners/dimensions/ratio/limit |
 | `POST /api/videos/<id>/settings/revert` | Save this video's default settings to the working file |
-| `POST /api/jobs` | Start with `{ "video_id": "…", "weather": false }` |
+| `POST /api/jobs` | Start with `{ "video_id": "…", "quick_analysis": false }`; weather advisory is attempted automatically after a forecast |
 | `GET /api/jobs/current` | Recover the most recent job |
 | `GET /api/jobs/<id>` | Read progress, averages, forecast, advisory |
-| `GET /api/jobs/<id>/frame` | Latest annotated JPEG |
+| `GET /api/jobs/<id>/frame` | Latest source snapshot JPEG |
+| `GET /api/jobs/<id>/preview` | JPEG data URL with its matching detections, source time, and sequence |
 | `POST /api/jobs/<id>/cancel` | Request cooperative cancellation |
 
 ```powershell

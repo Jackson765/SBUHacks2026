@@ -18,6 +18,7 @@ class VideoClock:
         self.first = None
         self.first_index = None
         self.constant_frame_timing = bool(np.isfinite(fps) and fps > 0)
+        self._frame_interval = 1.0 / fps if self.constant_frame_timing else None
 
     def timestamp(self, frame_index, position_msec):
         value = frame_index / self.fps if self.source == "fps" else position_msec / 1000.0
@@ -29,9 +30,20 @@ class VideoClock:
             )
         if self.first is None:
             self.first, self.first_index = value, frame_index
-        if self.constant_frame_timing:
-            expected = self.first + (frame_index - self.first_index) / self.fps
-            self.constant_frame_timing = abs(value - expected) < 1e-5
+        if self.constant_frame_timing and self.previous is not None:
+            index_step = frame_index - self._previous_index
+            interval = (value - self.previous) / index_step if index_step > 0 else float('inf')
+            # Decoder tick rounding and nominal/average FPS differences are normal.
+            # Require locally stable cadence within one millisecond,
+            # rather than accumulating a 10-microsecond absolute phase error.
+            tolerance = .001 + 1e-9
+            self.constant_frame_timing = (
+                abs(interval - 1.0 / self.fps) <= tolerance
+                and abs(interval - self._frame_interval) <= tolerance
+            )
+            if self.constant_frame_timing:
+                self._frame_interval = (value - self.first) / (frame_index - self.first_index)
+        self._previous_index = frame_index
         self.previous = value
         return value
 
@@ -43,7 +55,17 @@ class VideoClock:
         """
         if self.previous is None:
             return 0.0
-        return self.previous + 1.0 / self.fps if self.constant_frame_timing else self.previous
+        if not self.constant_frame_timing:
+            return self.previous
+        duration = self.previous - self.first + self._frame_interval
+        # Stable CFR durations just below a whole second can be decoder rounding,
+        # e.g. 24-FPS millisecond timestamps ending at 899.999667 instead of 900.
+        # Snap only within the same bounded clock precision used above; VFR and
+        # unknown-duration sources never enter this branch.
+        rounded = round(duration)
+        if rounded > 0 and abs(duration-rounded) <= .001:
+            duration = float(rounded)
+        return self.first + duration
 
 
 def prompt_video_path():

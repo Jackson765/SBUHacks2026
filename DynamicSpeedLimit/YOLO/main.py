@@ -17,7 +17,7 @@ from calibration import run_calibration, window_is_open
 from video_calibration import VideoCalibrationControls
 from config import (CALIBRATION_PATH, SIMULATION_ROAD_PADDING, SIMULATION_TARGET_FPS,
                     DETECTION_CONFIDENCE, DETECTION_IMAGE_SIZE, FPS_OVERRIDE, FRAME_SKIP,
-                    VEHICLE_CLASSES, VIDEO_PATH, WINDOW_NAME, YOLO_MODEL_PATH)
+                    MAX_TRACK_GAP_SECONDS, VEHICLE_CLASSES, VIDEO_PATH, WINDOW_NAME, YOLO_MODEL_PATH)
 from tracker import SpeedTracker
 from ratio_predict import prompt_ratio, validate_ratio, scale_average_speeds, predict_scaled_averages
 from speed_windows import WINDOW_SECONDS, FiveMinuteAverages
@@ -63,12 +63,13 @@ def display_weather_advisory(forecast, base_speed_limit):
     try:
         import api_code
         from decision_engine import evaluate_advisory
-        from config import ADVISORY_FREE_FLOW_SPEED_MPH, ADVISORY_ROAD_TYPE
+        from config import ADVISORY_FREE_FLOW_SPEED_MPH, ADVISORY_LEGAL_MAX_SPEED_MPH, ADVISORY_ROAD_TYPE
         from ui import format_advisory
         weather = api_code.get_current_weather()
         decision = evaluate_advisory(forecast["predicted_speed"], ADVISORY_FREE_FLOW_SPEED_MPH,
                                      base_speed_limit, weather, ADVISORY_ROAD_TYPE,
-                                     prediction_age_seconds=perf_counter()-started)
+                                     prediction_age_seconds=perf_counter()-started,
+                                     legal_max_speed_mph=ADVISORY_LEGAL_MAX_SPEED_MPH)
         print(format_advisory(decision, weather), flush=True)
         return decision
     except Exception as error:
@@ -96,6 +97,16 @@ def process_video_realtime(cap, first_frame, first_timestamp_msec, clock, video_
                          playback_args, observer=observer, should_stop=should_stop)
 
 
+def tracking_frame_step(fps, requested_step):
+    """Do not let inference sampling itself exceed the tracker's maximum gap."""
+    if not isinstance(requested_step, int) or requested_step < 1:
+        raise ValueError("FRAME_SKIP must be a positive integer.")
+    if not np.isfinite(fps) or fps <= 0:
+        return 1  # Decode every frame without inventing FPS-based timestamps.
+    maximum_step = max(1, int(np.floor(fps * MAX_TRACK_GAP_SECONDS * .8 + 1e-9)))
+    return min(requested_step, maximum_step)
+
+
 def process_video(cap, first_frame, first_timestamp_msec, clock, video_path, settings, store, args,
                   *, observer=None, should_stop=None):
     """One inference/measurement loop shared by analysis and both preview modes."""
@@ -104,12 +115,13 @@ def process_video(cap, first_frame, first_timestamp_msec, clock, video_path, set
     fps = clock.fps
     frame_size = (first_frame.shape[1], first_frame.shape[0])
     calibration, ratio, base_speed_limit = settings.calibration, settings.ratio, settings.base_speed_limit
+    safe_step = tracking_frame_step(fps, FRAME_SKIP)
     plan = None
     if not real_time and not visual and not args.full_analysis:
         plan = make_simulation_plan(frame_size, calibration.points, fps,
                                     target_fps=SIMULATION_TARGET_FPS, padding=SIMULATION_ROAD_PADDING,
-                                    maximum_image_size=DETECTION_IMAGE_SIZE, fallback_step=FRAME_SKIP)
-    frame_step = plan.frame_step if plan is not None else FRAME_SKIP
+                                    maximum_image_size=DETECTION_IMAGE_SIZE, fallback_step=safe_step)
+    frame_step = plan.frame_step if plan is not None else safe_step
     image_size = plan.image_size if plan is not None else DETECTION_IMAGE_SIZE
     if plan is not None:
         print(f"Fast analysis: detect every {frame_step} source frames; road crop {plan.bounds}; inference size {image_size}.", flush=True)
@@ -258,7 +270,7 @@ def process_video(cap, first_frame, first_timestamp_msec, clock, video_path, set
         position_msec = cap.get(cv2.CAP_PROP_POS_MSEC)
         frame_index += 1
     if observer is not None:
-        observer(collector._last_time, collector, None, [])
+        observer(collector._last_time, collector, None, None)
     if collector.complete:
         print(f"Processed 15 minutes of source video in {perf_counter()-started:.2f}s; {detection_frames} detection frames.", flush=True)
         forecast = forecast_collected_averages(collector.averages, ratio)

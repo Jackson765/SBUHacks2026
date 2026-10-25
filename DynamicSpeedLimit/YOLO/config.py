@@ -13,13 +13,15 @@ VIDEO_H = 540
 DISPLAY_HEIGHT = 540
 SIGN_WIDTH = 400
 
-# Default prompt value; each video's input/preset limit stays fixed during a run.
+# Default prompt value; each video's base-speed reference stays fixed during a run.
 DEFAULT_SPEED_LIMIT = 30
 
 # Advisory output is separate from the fixed input sign. Explicit demo assumptions:
 # neither free-flow speed nor the legal posted limit has been independently verified.
 ADVISORY_FREE_FLOW_SPEED_MPH = 55.0
 ADVISORY_ROAD_TYPE = "unknown"
+# Verified maximum provided for this deployment; recommendations must not exceed it.
+ADVISORY_LEGAL_MAX_SPEED_MPH = 70.0
 ADVISORY_POLICY = {
     "normal_flow_ratio": 0.80, "moderate_flow_ratio": 0.60,
     "normal_reduction_mph": 0.0, "moderate_reduction_mph": 10.0, "severe_reduction_mph": 20.0,

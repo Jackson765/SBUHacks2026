@@ -69,13 +69,15 @@ preserving the baseline and other working profiles.
 `--ratio 2` overrides the selected ratio for that run without changing the saved
 profile. A profile for a replaced file is ignored; a resolution mismatch requires
 recalibration. The ratio stays fixed in normal analysis and locked playback.
-The input speed limit stays fixed in every mode.
+The entered base speed stays fixed in every mode. The weather advisory may
+recommend above that base when traffic/weather rules allow, up to the configured
+legal maximum.
 
 Use a stationary recording of a flat road rectangle with **measured** dimensions.
 Width runs across the road; length runs along the road. `--calibrate` starts
 with setup, then opens editable playback:
 
-1. Select the video and enter the ratio, speed limit, and measured dimensions.
+1. Select the video and enter the ratio, base speed, and measured dimensions.
 2. Drag the first frame's four colored handles to the measured road corners.
 3. Press Enter to save and start playback with calibration controls. R resets
    the handles, Backspace undoes a drag, and Q/Escape cancels setup.
@@ -102,7 +104,7 @@ the current video time. This prevents measurements from different calibrations
 entering one forecast. A further 15 minutes of valid video history is needed
 after an edit to complete collection.
 
-Setup and S save geometry, effective dimensions, ratio, and fixed input limit
+Setup and S save geometry, effective dimensions, ratio, and fixed base speed
 atomically to `YOLO/calibrationtemp.json`, retaining other videos' profiles. The next
 normal or visual run reuses the saved settings automatically. No source editing
 or copying terminal output is needed.
@@ -162,6 +164,18 @@ In calibration mode, these elapsed times start again after each accepted edit.
 Short visual clips play to EOF. A forecast requires all three completed blocks
 with valid averages; short or cancelled runs do not invent missing history.
 
+Full-frame modes reduce the detection stride for low-FPS footage so sampling
+does not exceed the tracker's maximum gap (3 FPS recordings are analyzed every
+frame). Missing FPS metadata also selects every frame without inventing timing.
+Source intervals longer than the configured tracker gap can still prevent valid
+speed measurements.
+
+For EOF coverage, stable presentation intervals tolerate bounded decoder tick
+rounding and small nominal-FPS differences. Final frame duration comes from the
+observed cadence. This permits exactly fifteen minutes of stable 30 FPS footage
+to close all windows without discarding its last frame duration. Substantially
+variable or unknown timing does not receive an invented extra frame duration.
+
 `ratio_predict.py` scales those three averages exactly once, calls the existing
 Model B predictor, then divides its predicted speed by the same ratio:
 
@@ -183,13 +197,20 @@ For direct prediction from three existing averages:
 python YOLO/ratio_predict.py --ratio 2 --history 25 28 30
 ```
 
-## Optional weather advisory
+## Weather advisory
 
-`--weather` fetches Open-Meteo weather only after a completed forecast and prints
-a short weather category, advisory/status, and relevant reasons. Normal runs
-neither import the optional weather modules nor make weather requests. Weather
+`--weather` fetches Open-Meteo weather after a completed forecast in the desktop
+CLI and prints a short weather category, advisory/status, and relevant reasons.
+The browser always attempts this advisory after a completed forecast. Weather
 failure preserves the existing forecast. The advisory uses its final local-mph
-speed once and does not change the fixed input sign.
+speed once and does not change the base-speed input.
+
+An advisory may exceed the entered base speed under favorable
+conditions. Traffic limits it by predicted flow and the configured free-flow
+speed; weather can only reduce that candidate. The result is capped at
+`ADVISORY_LEGAL_MAX_SPEED_MPH` (currently 70 mph). Unknown roads and severe
+weather continue to require manual review; this experimental advisory is not
+an official speed limit.
 
 Current weather is applied as a scenario to the recorded video; it is not weather
 measured when the footage was recorded. The rules are experimental, with settings
@@ -200,6 +221,7 @@ in `config.py`:
 | `ADVISORY_FREE_FLOW_SPEED_MPH` | 55 mph assumed free-flow speed; replace with a measured value. |
 | `ADVISORY_ROAD_TYPE` | `unknown` by default, requiring manual review. |
 | `ADVISORY_POLICY` | Traffic/weather rules, freshness limits, and rounding. |
+| `ADVISORY_LEGAL_MAX_SPEED_MPH` | Verified hard ceiling for advisory output (70 mph). |
 | `WEATHER_LOCATION` | Stony Brook, NY area (40.91, -73.14). |
 | `WEATHER_TIMEOUT` / `WEATHER_CACHE_SECONDS` | Bounded requests and a ten-minute process cache. |
 

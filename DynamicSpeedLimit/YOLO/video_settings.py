@@ -2,6 +2,8 @@
 from dataclasses import dataclass
 import json
 from pathlib import Path
+from shutil import copy2
+from uuid import uuid4
 
 import numpy as np
 
@@ -29,6 +31,11 @@ def prompt_base_speed_limit():
             return validate_base_speed_limit(raw or DEFAULT_SPEED_LIMIT)
         except ValueError as error:
             print(error)
+
+
+def scale_for_speed_limit(value):
+    """Browser forecast scale: entered limit in mph divided by the 45 mph reference."""
+    return validate_base_speed_limit(value) / 45.0
 
 
 @dataclass
@@ -59,8 +66,10 @@ class VideoSettingsStore:
     Profiles include file identity so replacing a video cannot reuse old geometry.
     Atomic writes retain profiles for other videos and the original defaults.
     """
-    def __init__(self, path=CALIBRATION_PATH):
+    def __init__(self, path=CALIBRATION_PATH, *, recover_invalid=False):
         self.path = Path(path)
+        self.load_error = None
+        self.backup_path = None
         self.defaults = json.loads(Path(VIDEO_DEFAULTS_PATH).read_text(encoding="utf-8"))
         if not isinstance(self.defaults, dict):
             raise ValueError(f"Video defaults in {VIDEO_DEFAULTS_PATH} must be an object keyed by filename.")
@@ -83,7 +92,11 @@ class VideoSettingsStore:
                 if self.data["version"] != 2 or not isinstance(self.data["profiles"], dict):
                     raise ValueError("Expected version 2 with a profiles object.")
             except (KeyError, TypeError, ValueError) as error:
-                raise ValueError(f"Invalid video settings in {self.path}: {error}") from error
+                message = f"Invalid video settings in {self.path}: {error}"
+                if not recover_invalid:
+                    raise ValueError(message) from error
+                self.load_error = message
+                self.data = {"version": 2, "profiles": {}}
 
     @staticmethod
     def key(video_path):
@@ -100,11 +113,13 @@ class VideoSettingsStore:
             print("Video file changed; using its original defaults. Use --calibrate to save new settings.")
         return self.defaults.get(Path(video_path).name), "migrated defaults"
 
-    def load(self, video_path, frame_size, ratio_override=None):
+    def load(self, video_path, frame_size, ratio_override=None, *, automatic_ratio=False):
         entry, source = self.entry(video_path)
         if entry is None:
             raise ValueError(f"No settings for {Path(video_path).name!r}; run --calibrate --video \"{video_path}\".")
         try:
+            if automatic_ratio:
+                ratio_override = scale_for_speed_limit(entry["base_speed_limit"])
             settings = validate_entry(entry, frame_size, ratio_override)
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError(f"Invalid settings for {Path(video_path).name!r}: {error} Run --calibrate to replace them.") from error
@@ -118,6 +133,12 @@ class VideoSettingsStore:
                      road_length_m=calibration.road_length_m, ratio=settings.ratio,
                      base_speed_limit=settings.base_speed_limit)
         validate_entry(entry, frame_size)
+        # Keep the unreadable original before any explicit save/revert replaces it.
+        if getattr(self, "load_error", None) and self.path.is_file():
+            backup = self.path.with_name(f"{self.path.stem}.invalid-{uuid4().hex}.json")
+            copy2(self.path, backup)
+            self.backup_path = backup
+            self.load_error = None
         self.data["profiles"][self.key(video_path)] = entry
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(json.dumps(self.data, indent=2, allow_nan=False) + "\n", encoding="utf-8")
@@ -134,7 +155,7 @@ class WorkingVideoSettingsStore(VideoSettingsStore):
         if baseline_path.resolve() == temp_path.resolve():
             raise ValueError("Default and working calibration files must have different paths.")
         self.baseline = VideoSettingsStore(baseline_path)
-        super().__init__(temp_path)
+        super().__init__(temp_path, recover_invalid=True)
 
     def entry(self, video_path):
         saved = self.data["profiles"].get(self.key(video_path))
@@ -145,10 +166,10 @@ class WorkingVideoSettingsStore(VideoSettingsStore):
         entry, source = self.baseline.entry(video_path)
         return entry, "default calibration" if source == "saved settings" else source
 
-    def load_default(self, video_path, frame_size):
+    def load_default(self, video_path, frame_size, *, automatic_ratio=False):
         """Use the baseline profile, then the original filename preset."""
         try:
-            settings = self.baseline.load(video_path, frame_size)
+            settings = self.baseline.load(video_path, frame_size, automatic_ratio=automatic_ratio)
         except ValueError as error:
             raise ValueError(f"No valid default calibration for {Path(video_path).name!r}. {error}") from error
         settings.source = "default calibration"
