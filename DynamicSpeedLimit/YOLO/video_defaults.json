@@ -1,0 +1,142 @@
+{
+  "traffic.mp4": {
+    "ratio": 1.0,
+    "base_speed_limit": 45,
+    "road_width_m": null,
+    "road_length_m": null,
+    "frame_size": [
+      null,
+      null
+    ],
+    "points": [
+      [
+        null,
+        null
+      ],
+      [
+        null,
+        null
+      ],
+      [
+        null,
+        null
+      ],
+      [
+        null,
+        null
+      ]
+    ]
+  },
+  "traffic2.mp4": {
+    "ratio": 1.0,
+    "base_speed_limit": 45,
+    "road_width_m": null,
+    "road_length_m": null,
+    "frame_size": [
+      null,
+      null
+    ],
+    "points": [
+      [
+        null,
+        null
+      ],
+      [
+        null,
+        null
+      ],
+      [
+        null,
+        null
+      ],
+      [
+        null,
+        null
+      ]
+    ]
+  },
+  "traffic3.mp4": {
+    "ratio": 1.0,
+    "base_speed_limit": 50,
+    "road_width_m": 500,
+    "road_length_m": 100,
+    "frame_size": [
+      960,
+      540
+    ],
+    "points": [
+      [
+        186,
+        278
+      ],
+      [
+        233,
+        275
+      ],
+      [
+        730,
+        535
+      ],
+      [
+        428,
+        537
+      ]
+    ]
+  },
+  "traffic4.mp4": {
+    "ratio": 1.0,
+    "base_speed_limit": 45,
+    "road_width_m": 10.688,
+    "road_length_m": 33.40608,
+    "frame_size": [
+      540,
+      960
+    ],
+    "points": [
+      [
+        165.19737243652344,
+        426.6666564941406
+      ],
+      [
+        246.90789794921875,
+        471.1111145019531
+      ],
+      [
+        202.5,
+        567.111083984375
+      ],
+      [
+        0.0,
+        437.3333435058594
+      ]
+    ]
+  },
+  "traffic5.mp4": {
+    "ratio": 1.0,
+    "base_speed_limit": 45,
+    "road_width_m": 300,
+    "road_length_m": 50,
+    "frame_size": [
+      540,
+      960
+    ],
+    "points": [
+      [
+        528,
+        545
+      ],
+      [
+        529,
+        675
+      ],
+      [
+        8,
+        860
+      ],
+      [
+        12,
+        638
+      ]
+    ]
+  }
+}
